@@ -6,7 +6,6 @@ add_definitions(-Wall)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(3rd
-                  glib-2.0 REQUIRED
                   openssl REQUIRED)
 include_directories(${3rd_INCLUDE_DIRS})
 set(LIBS
@@ -23,5 +22,13 @@ set(LIBS
     license
     )
 
-add_executable(test main.cpp)
+pkg_check_modules(GoogleTest gtest_main)
+if (GoogleTest_FOUND)
+    include_directories(${GoogleTest_INCLUDE_DIRS})
+    set(LIBS
+        ${LIBS}
+        ${GoogleTest_LIBRARIES})
+endif (GoogleTest_FOUND)
+
+add_executable(test test.cpp)
 target_link_libraries(test ${LIBS} license)
