@@ -1,5 +1,5 @@
 #include "license.h"
-#include <sys/time.h>
+#include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +8,7 @@
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/md5.h>
+#include <endian.h>
 
 #define LOG_INFO(format, ...) { fprintf(stderr, "INFO " format "\n", ##__VA_ARGS__); }
 #define LOG_FATAL(format, ...) do \
@@ -17,7 +18,6 @@
         } while(0)
 
 #define MAGIC_STR ("AtlasDB")
-#define MAX_CUSTOMER_LEN (32)
 
 const char* PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\n"
                          "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArOuglPZzFqSgCU7iI+Uh\n"
@@ -29,24 +29,29 @@ const char* PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\n"
                          "+wIDAQAB\n"
                          "-----END PUBLIC KEY-----\n";
 
-static bool openssl_error_load = false;
-
+static bool openssl_error_loaded = false;
 
 /* 取消内存对齐 */
 #pragma pack(push, 1)
-typedef struct RawLicenseData {
-  uint64_t from;          /*授权开始时间*/
-  uint64_t to;            /*权结束时间*/
+
+/*证书信息*/
+typedef struct RawLicenseContent {
+  uint64_t from;          /*授权开始时间, 大端*/
+  uint64_t to;            /*权结束时间, 大端*/
   uint8_t customer[0];    /*客户字符串, 包含结尾\0*/
-} RawLicenseData;
+} RawLicenseContent;
 
 typedef struct RawLicense {
-  uint64_t magic;         /*固定值*/
-  uint8_t md5[32];        /*RawLicenseData 的 md5*/
-  uint16_t data_len;      /*RawLicenseData 的长度 */
-  RawLicenseData data[0]; /* 证书信息 */
+  uint64_t magic;             /*固定值*/
+  uint8_t md5[32];           /*content 的 md5*/
+  uint32_t content_len;      /*content 的长度, 大端 */
+  RawLicenseContent content[0]; /* 证书信息 */
 } RawLicense;
 #pragma pack(pop)
+
+/* 为了使加密不分片，限制客户名的长度 */
+#define MAX_CUSTOMER_LEN (48)
+#define MAX_LICENSE_CONTENT_LEN (MAX_CUSTOMER_LEN + sizeof(RawLicenseContent))
 
 static uint64_t get_magic_number();
 static const char* openssl_last_error();
@@ -75,9 +80,9 @@ uint64_t license_current_timestamp() {
 RawLicense* raw_license_construct(uint64_t from, uint64_t to, const char* customer) {
   RawLicense* hdr;
   const char* md5_str;
-  size_t customer_len = strlen(customer);
-  size_t license_data_len = sizeof(RawLicenseData) + 1 + customer_len;
-  size_t total_len = sizeof(RawLicense) + license_data_len;
+  size_t customer_len = strlen(customer) + 1;
+  size_t content_len = sizeof(RawLicenseContent) + customer_len;
+  size_t total_len = sizeof(RawLicense) + content_len;
 
   if (from >= to) {
     LOG_FATAL("invalid param, from %lu, to %lu", from, to);
@@ -85,26 +90,29 @@ RawLicense* raw_license_construct(uint64_t from, uint64_t to, const char* custom
   if (!customer) {
     LOG_FATAL("invalid customer");
   }
-  if (license_data_len > MAX_CUSTOMER_LEN) {
+  if (customer_len > MAX_CUSTOMER_LEN) {
     LOG_FATAL("customer too long: %lu", customer_len);
   }
   hdr = (RawLicense*) malloc(total_len);
   memset(hdr, 0, total_len);
-  hdr->data->from = from;
-  hdr->data->to = to;
-  memcpy(hdr->data->customer, customer, customer_len);
-  hdr->data_len = license_data_len;
   hdr->magic = get_magic_number();
+  /*数值都转为大端*/
+  hdr->content_len = htobe32(content_len);
+  hdr->content->from = htobe64(from);
+  hdr->content->to = htobe64(to);
+  memcpy(hdr->content->customer, customer, customer_len);
 
-  md5_str = compute_md5((uint8_t*) hdr->data, hdr->data_len);
+  /*计算md5*/
+  md5_str = compute_md5((uint8_t*) hdr->content, content_len);
   memcpy(hdr->md5, md5_str, 32);
-
-  hdr->data_len = license_data_len;
   return hdr;
 }
 
 bool raw_license_verify(RawLicense* license, uint64_t timestamp) {
   const char* md5_str;
+  uint32_t content_len;
+  uint64_t from;
+  uint64_t to;
   if (license->magic != get_magic_number()) {
     char buf[8];
     memcpy(buf, &license->magic, 8);
@@ -120,25 +128,27 @@ bool raw_license_verify(RawLicense* license, uint64_t timestamp) {
     return false;
   }
 
-  if (license->data_len > MAX_CUSTOMER_LEN) {
-    LOG_INFO("license too long %d", license->data_len);
+  /*数据类型从大端转到本机的节节序*/
+  content_len = be32toh(license->content_len);
+  from = be64toh(license->content->from);
+  to = be64toh(license->content->to);
+
+  if (content_len > MAX_LICENSE_CONTENT_LEN) {
+    LOG_INFO("license too long %d", content_len);
     return false;
   }
 
-  md5_str = compute_md5((uint8_t*) license->data, license->data_len);
+  md5_str = compute_md5((uint8_t*) license->content, content_len);
   if (memcmp(md5_str, license->md5, 32) != 0) {
     char buf[33] = {0,};
     memcpy(buf, license->md5, 32);
     LOG_INFO("invalid md5, %s %s", md5_str, buf);
     return false;
   }
-  LOG_INFO("md5 = [%s]", md5_str);
 
-  if (timestamp < license->data->from || timestamp > license->data->to) {
-    LOG_INFO("license expired (from %lu to %lu, now %lu)", license->data->from, license->data->to, timestamp);
+  if (timestamp < from || timestamp > to) {
     return false;
   }
-  LOG_INFO("for [%s]", (const char*) license->data->customer);
   return true;
 }
 
@@ -150,9 +160,9 @@ void raw_license_free(RawLicense* license) {
 }
 
 static const char* openssl_last_error() {
-  if (!openssl_error_load) {
+  if (!openssl_error_loaded) {
     SSL_load_error_strings();
-    openssl_error_load = true;
+    openssl_error_loaded = true;
   }
   return ERR_error_string(ERR_get_error(), NULL);
 }
@@ -160,7 +170,7 @@ static const char* openssl_last_error() {
 /*
  * 使用私钥加密数据
  * private_key: 私钥
- * data: 数据
+ * content: 数据
  * len: 数据的长度
  * encrypted: 返回加密后的长度
  * 成功返回 malloc 内存，失败返回 NULL
@@ -185,6 +195,7 @@ uint8_t* private_key_encrypt_data(const char* private_key, const uint8_t* data, 
   rsa_size = RSA_size(rsa);
   buff = malloc(rsa_size);
 
+  /*已经限制了加密数据的长度，所以不会产生分片*/
   *encrypted = RSA_private_encrypt(len, (const uint8_t*) data, buff, rsa, RSA_PKCS1_PADDING);
   if (*encrypted == -1) {
     LOG_INFO("RSA_private_encrypt error %s", openssl_last_error());
@@ -206,7 +217,7 @@ cleanup:
 
 /*
  * 使用公钥解密数据
- * data: 数据
+ * content: 数据
  * len: 数据的长度
  * decrypt: 返回解密后的长度
  * 成功返回 malloc 内存，失败返回 NULL
@@ -231,6 +242,7 @@ uint8_t* public_key_decrypt_data(const uint8_t* data, int len, int* decrypt) {
   rsa_size = RSA_size(rsa) - 11;
   buff = malloc(rsa_size);
 
+  /*已经限制了加密数据的长度，所以不会产生分片*/
   *decrypt = RSA_public_decrypt(len, (const uint8_t*) data, buff, rsa, RSA_PKCS1_PADDING);
   if (*decrypt == -1) {
     LOG_INFO("RSA_public_encrypt error %s", openssl_last_error());
