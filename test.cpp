@@ -7,14 +7,22 @@
 TEST(test, gen) {
   const char* path = "/tmp/license.dat";
   remove(path);
-  bool ok = encrypted_license_gen(path, PRIVATE_KEY, 1, 10, "my customer");
+  uint64_t from = 1567671260;
+  uint64_t to = from + 3600;
+
+  bool ok = encrypted_license_gen(path, PRIVATE_KEY, from, to, "my customer");
   ASSERT_TRUE(ok);
 
   RawLicense* lic = encrypted_license_open(path);
   ASSERT_TRUE(lic != NULL);
-  ASSERT_TRUE(raw_license_verify(lic, 5));
-  ASSERT_FALSE(raw_license_verify(lic, 15));
-  ASSERT_FALSE(raw_license_verify(lic, 0));
+  ASSERT_TRUE(raw_license_verify(lic, from + 5));
+  ASSERT_FALSE(raw_license_verify(lic, to + 1));
+  ASSERT_FALSE(raw_license_verify(lic, from - 1));
+
+  char buff[1024];
+  raw_license_dump(lic, buff, sizeof(buff));
+
+  fprintf(stderr, "--------------------\n%s\n", buff);
   raw_license_free(lic);
 }
 

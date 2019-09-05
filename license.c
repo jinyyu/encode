@@ -9,12 +9,12 @@
 #include <openssl/ssl.h>
 #include <openssl/md5.h>
 #include <endian.h>
+#include <assert.h>
 
 static char ERROR_BUFF[1024];
 #define LOG_ERROR(format, ...) do \
         { \
              snprintf(ERROR_BUFF, sizeof(ERROR_BUFF), "ERROR " format "\n", ##__VA_ARGS__); \
-             exit(EXIT_FAILURE); \
         } while(0)
 
 #define MAGIC_STR ("AtlasDB")
@@ -71,6 +71,30 @@ uint64_t license_current_timestamp() {
   clear_error_msg();
   gettimeofday(&tv, NULL);
   return tv.tv_sec;
+}
+
+/*
+ * 时间戳转为字符串, 要求 len 至少 64 字节
+ */
+void license_timestamp_to_string(uint64_t timestamp, char* buf, int len) {
+  struct timeval tm;
+  struct tm result;
+  tm.tv_sec = timestamp;
+  tm.tv_usec = 0;
+
+  assert(buf);
+  assert(len >= 64);
+
+  localtime_r(&tm.tv_sec, &result);
+  snprintf(buf,
+           len,
+           "%04d-%02d-%02d %02d:%02d:%02d",
+           result.tm_year + 1900,
+           result.tm_mon + 1,
+           result.tm_mday,
+           result.tm_hour,
+           result.tm_min,
+           result.tm_sec);
 }
 
 /*
@@ -185,6 +209,27 @@ bool raw_license_verify(RawLicense* license, uint64_t timestamp) {
     return false;
   }
   return true;
+}
+
+/*
+ * 返回证书信息，字符串, len 最少 256
+ */
+void raw_license_dump(RawLicense* license, char* buff, int len) {
+  char from_str[64];
+  char to_str[64];
+  uint64_t from = be64toh(license->content->from);
+  uint64_t to = be64toh(license->content->to);
+  const char* customer = (const char*) license->content->customer;
+  assert(len >= 256);
+  license_timestamp_to_string(from, from_str, sizeof(from_str));
+  license_timestamp_to_string(to, to_str, sizeof(to_str));
+
+  snprintf(buff, len, "Customer     %s\n"
+                      "Begins On    %s\n"
+                      "Expires On   %s\n",
+           customer,
+           from_str,
+           to_str);
 }
 
 /*
