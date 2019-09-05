@@ -4,6 +4,20 @@
 #include "private_key.h"
 #include <vector>
 
+TEST(test, gen) {
+  const char* path = "/tmp/license.dat";
+  remove(path);
+  bool ok = encrypted_license_gen(path, PRIVATE_KEY, 1, 10, "my customer");
+  ASSERT_TRUE(ok);
+
+  RawLicense* lic = encrypted_license_open(path);
+  ASSERT_TRUE(lic != NULL);
+  ASSERT_TRUE(raw_license_verify(lic, 5));
+  ASSERT_FALSE(raw_license_verify(lic, 15));
+  ASSERT_FALSE(raw_license_verify(lic, 0));
+  raw_license_free(lic);
+}
+
 TEST(test, license) {
   struct Test {
     uint64_t from;
@@ -21,7 +35,7 @@ TEST(test, license) {
   tests.push_back(Test{.from = 1, .to = 10, .tm = 11, .ok = false});
 
   for (auto& t :  tests) {
-    RawLicense* license = raw_license_construct(t.from, t.to, str);
+    RawLicense* license = raw_license_construct(t.from, t.to, str, NULL);
     bool ok = raw_license_verify(license, t.tm);
     ASSERT_EQ(ok, t.ok);
     raw_license_free(license);
