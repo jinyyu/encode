@@ -532,6 +532,7 @@ RawLicense* encrypted_license_open(const char* path) {
   }
 
   ret = lic;
+  lic = NULL;
 
 cleanup:
   if (fp) {
@@ -539,6 +540,9 @@ cleanup:
   }
   if (encrypt_data) {
     free(encrypt_data);
+  }
+  if (lic) {
+    free(lic);
   }
   return ret;
 }
